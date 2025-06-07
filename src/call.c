@@ -61,6 +61,7 @@ struct call {
 	bool got_offer;           /**< Got SDP Offer from Peer              */
 	bool on_hold;             /**< True if call is on hold (local)      */
 	bool ans_queued;          /**< True if an (auto) answer is queued   */
+	bool progr_queued;        /**< True if a progress response is queued*/
 	struct mnat_sess *mnats;  /**< Media NAT session                    */
 	bool mnat_wait;           /**< Waiting for MNAT to establish        */
 	struct menc_sess *mencs;  /**< Media encryption session state       */
@@ -1029,20 +1030,24 @@ int call_connect(struct call *call, const struct pl *paddr)
 	call->peer_uri = mem_deref(call->peer_uri);
 	if (0 == sip_addr_decode(&addr, paddr)) {
 
+		uri_header_get(&addr.uri.headers, &rname, &rval);
+		if (pl_isset(&rval))
+			err = re_sdprintf(&call->replaces, "%H",
+					  uri_header_unescape, &rval);
+
+		addr.uri.headers.l = 0;
+
 		if (pl_isset(&addr.params)) {
-			err = re_sdprintf(&call->peer_uri, "%r%r",
-					  &addr.auri, &addr.params);
+			err |= re_sdprintf(&call->peer_uri, "%H%r", uri_encode,
+					   &addr.uri, &addr.params);
 		}
 		else {
-			err = pl_strdup(&call->peer_uri, &addr.auri);
+			err |= re_sdprintf(&call->peer_uri, "%H", uri_encode,
+					   &addr.uri);
 		}
 
 		if (pl_isset(&addr.dname))
 			pl_strdup(&call->peer_name, &addr.dname);
-
-		uri_header_get(&addr.uri.headers, &rname, &rval);
-		if (pl_isset(&rval))
-			err = re_sdprintf(&call->replaces, "%r",&rval);
 
 	}
 	else {
@@ -1054,7 +1059,7 @@ int call_connect(struct call *call, const struct pl *paddr)
 	set_state(call, CALL_STATE_OUTGOING);
 	call_event_handler(call, CALL_EVENT_OUTGOING, "%s", call->peer_uri);
 
-	/* If we are using asyncronous medianat like STUN/TURN, then
+	/* If we are using asynchronous medianat like STUN/TURN, then
 	 * wait until completed before sending the INVITE */
 	if (!call->acc->mnat) {
 		err = send_invite(call);
@@ -1246,6 +1251,7 @@ int call_progress_dir(struct call *call, enum sdp_dir adir, enum sdp_dir vdir)
 			       ua_print_allowed, call->ua,
 			       ua_print_require, call->ua);
 
+	call->progr_queued = (err == EAGAIN);
 	if (err)
 		goto out;
 
@@ -2109,6 +2115,8 @@ static void prack_handler(const struct sip_msg *msg, void *arg)
 
 	if (call->ans_queued && !call->answered)
 		(void)call_answer(call, 200, VIDMODE_ON);
+	else if (call->progr_queued && !call->answered)
+		(void)call_progress(call);
 
 	return;
 }
@@ -2419,7 +2427,8 @@ static void sipsess_progr_handler(const struct sip_msg *msg, void *arg)
 	switch (msg->scode) {
 
 	case 180:
-		set_state(call, CALL_STATE_RINGING);
+		if (call_state(call) != CALL_STATE_EARLY)
+			set_state(call, CALL_STATE_RINGING);
 		break;
 
 	case 183:
@@ -2434,7 +2443,7 @@ static void sipsess_progr_handler(const struct sip_msg *msg, void *arg)
                                    call->peer_uri);
 		mem_deref(call);
 	}
-	else {
+	else if (call_state(call) != CALL_STATE_EARLY) {
 		call_stream_stop(call);
 		call_event_handler(call, CALL_EVENT_RINGING, "%s",
                                    call->peer_uri);
@@ -2870,18 +2879,25 @@ int call_replace_transfer(struct call *call, struct call *source_call)
 {
 	int err;
 
+	if (!call || !source_call)
+		return EINVAL;
+
 	info("transferring call to %s\n", source_call->peer_uri);
 
 	call->sub = mem_deref(call->sub);
 
 	err = sipevent_drefer(&call->sub, uag_sipevent_sock(),
-			      sipsess_dialog(call->sess), ua_cuser(call->ua),
-			      auth_handler, call->acc, true,
-			      sipsub_notify_handler, sipsub_close_handler,
-                              call,
-			 "Refer-To: <%s?Replaces=%s>\r\nReferred-by: %s\r\n",
-                              source_call->peer_uri, source_call->id,
-		              account_aor(ua_account(call->ua)));
+		sipsess_dialog(call->sess), ua_cuser(call->ua),
+		auth_handler, call->acc, true,
+		sipsub_notify_handler, sipsub_close_handler, call,
+	"Refer-To: <%s?Replaces=%s%%3Bto-tag%%3D%s%%3Bfrom-tag%%3D%s>\r\n"
+		"Referred-By: %s\r\n",
+		source_call->peer_uri,
+		source_call->id,
+		sip_dialog_rtag(sipsess_dialog(source_call->sess)),
+		sip_dialog_ltag(sipsess_dialog(source_call->sess)),
+		account_aor(ua_account(call->ua)));
+
 	if (err) {
 		warning("call: sipevent_drefer: %m\n", err);
 	}

@@ -777,7 +777,7 @@ static int video_stream_decode(struct vrx *vrx, const struct rtp_header *hdr,
 
 		if (err != EPROTO) {
 			warning("video: %s decode error"
-				" (seq=%u, %u bytes): %m\n",
+				" (seq=%u, %zu bytes): %m\n",
 				vrx->vc->name, hdr->seq,
 				mbuf_get_left(mb), err);
 		}
@@ -1359,7 +1359,7 @@ int video_start_source(struct video *v)
 
 	struct vtx *vtx = &v->vtx;
 
-	debug("video: start source\n");
+	debug("video: start source %s,%s\n", vtx->module, vtx->device);
 
 	if (vidsrc_find(baresip_vidsrcl(), NULL)) {
 		struct vidsrc *vs;

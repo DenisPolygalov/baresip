@@ -128,7 +128,7 @@ struct audio {
 	bool started;                 /**< Stream is started flag          */
 	bool level_enabled;           /**< Audio level RTP ext. enabled    */
 	bool hold;                    /**< Local hold flag                 */
-	bool conference;              /**< Local conference flag           */
+	RE_ATOMIC bool conference;    /**< Local conference flag           */
 	uint8_t extmap_aulevel;       /**< ID Range 1-14 inclusive         */
 	audio_event_h *eventh;        /**< Event handler                   */
 	audio_level_h *levelh;        /**< Audio level handler             */
@@ -429,6 +429,7 @@ static void poll_aubuf_tx(struct audio *a)
 	auframe_init(&af, tx->src_fmt, tx->sampv, sampc, srate, ch);
 	aubuf_read_auframe(tx->aubuf, &af);
 
+	mtx_lock(tx->mtx);
 	/* Process exactly one audio-frame in list order */
 	for (le = tx->filtl.head; le; le = le->next) {
 		struct aufilt_enc_st *st = le->data;
@@ -436,6 +437,7 @@ static void poll_aubuf_tx(struct audio *a)
 		if (st->af && st->af->ench)
 			err |= st->af->ench(st, &af);
 	}
+	mtx_unlock(tx->mtx);
 	if (err) {
 		warning("audio: aufilter encode: %m\n", err);
 	}
@@ -1004,7 +1006,9 @@ static int aufilt_setup(struct audio *a, struct list *aufiltl)
 			}
 			else {
 				encst->af = af;
+				mtx_lock(tx->mtx);
 				list_append(&tx->filtl, &encst->le, encst);
+				mtx_unlock(tx->mtx);
 			}
 		}
 
@@ -1902,7 +1906,7 @@ int audio_set_conference(struct audio *au, bool conference)
 	if (!au)
 		return EINVAL;
 
-	au->conference = conference;
+	re_atomic_rlx_set(&au->conference, conference);
 
 	return 0;
 }
@@ -1917,7 +1921,7 @@ int audio_set_conference(struct audio *au, bool conference)
  */
 bool audio_is_conference(const struct audio *au)
 {
-	return au ? au->conference : false;
+	return au ? re_atomic_rlx(&au->conference) : false;
 }
 
 
